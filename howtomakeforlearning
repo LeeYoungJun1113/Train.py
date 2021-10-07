@@ -1,0 +1,176 @@
+import numpy as np
+from torch.utils.data import DataLoader, random_split
+from torch.utils.tensorboard import SummaryWriter
+import torch.nn.functional as F
+
+from model.mydataset import * # * = 안에 있는 클래스 전부 가져온다
+from model.mynetwork import * # * = 안에 있는 클래스 전부 가져온다
+from util.util import * # * = 안에 있는 클래스 전부 가져온다
+
+# 아래의 코드는 코랩에서 실제 학습시킬 때 쓰이는 부분들이고, main.py 에서 먼저 parameter를 설정해준다.
+def train(args): # main.py 의 마지막 부분, 외부에서 넣어줄 파라미터, 저장될 경로
+    torch.manual_seed(111) # 임의로 숫자로 고정한 후, 다른 모델과 학습률을 비교한다
+    mode = args.mode # train 인지 test 구분한다
+    data_dir = args.data_dir # MATLAB 에서 .h5 저장한 데이터를 불러들인다
+    res_dir = args.res_dir # result 데이터 들어갈 곳
+    ckpt_dir = args.ckpt_dir # 학습할 모든 weight check point 로서, 마지막 저장된 파일을 불러 쓸 수 있다.
+    log_dir = args.log_dir # log 도표 들어갈 곳
+
+    batch_size = args.batch_size
+    width = args.width
+    height = args.height
+
+    lr = args.lr
+    num_epoch = args.num_epoch
+    cont = args.cont
+    optim_choice = args.optim
+    
+# 정상적으로 gpu를 통해서 학습하는지 보는..
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
+# 코랩에서 실행시켰을 때 나오는 설명 문구
+    print('Device Type?:', device)
+    print('GPU Name?:', torch.cuda.get_device_name())
+
+    if not os.path.exists(res_dir): # os 운영체제에서 result 경로가 없다면 만든다
+        os.makedirs(os.path.join(res_dir))
+    if not os.path.exists(ckpt_dir): # os 운영체제에서 result 경로가 없다면 만든다
+        os.makedirs(os.path.join(ckpt_dir))
+    if not os.path.exists(log_dir): # os 운영체제에서 result 경로가 없다면 만든다
+        os.makedirs(os.path.join(log_dir))
+
+    dataset = GetMyData2(data_path = data_dir)
+    # train, test ( train은 배치에 맞게 짠거고, test 는 else 구문으로 바로 돌린다)
+    if mode == 'train':
+        num_data_val = int(len(dataset) * 0.1) # 정수형으로 val.data 로 만든다 ex. data 500 => train 450, val 50(451~500)
+        num_data_train = len(dataset) - num_data_val # 위의 val. total number를 total data 빼준다 = total train number
+        dataset_train, dataset_val = random_split(dataset, [num_data_train, num_data_val]) # ex.totla data => randomly choosing train 450, val 50 in total data 500
+    # batch usage
+        num_batch_train = np.ceil(num_data_train / batch_size) # 나중에 batch 늘릴 수 있을 때 늘려서 배치만큼 한번에 학습하기
+        num_batch_val = np.ceil(num_data_val / batch_size)
+
+        batch_train = DataLoader(dataset_train, batch_size = batch_size, num_workers=0) #? batch에 맞게 다시 train data 정리
+        batch_val = DataLoader(dataset_val, batch_size = batch_size, num_workers=0)
+    else: #? --mode train 이 아닐 시에 --mode test 라는 의미로 else 구문으로 들어가는 건가요?
+        num_data_test = len(dataset) #? len 을 통해서 dataset의 크기를 가져온다, data .h5 안에는 미리 train, test 로 나눠준 것은 알겠지만, 나눠준 test의 크기를 가져오는 건가요?
+        num_batch_test = np.ceil(num_data_test / batch_size)
+        # numpy.ceil 함수는 천장함수(올림함수). 입력의 요소 단위의 ‘ceil’ 값을 반환한다. 
+        # 스칼라 x의 ‘ceil’는 x보다 크거나 같은, 가장 가까운 정수를 반환한다.
+        # np.floor() 작거나 같은, 가장 가까운 정수 반환 (<=>ceil)
+        # np.trunc() 소수점 버린다, np.round(수, 자릿수) 반올림(오사오입) 
+        batch_test = DataLoader(dataset, batch_size = batch_size, num_workers=0)
+
+    #네트워크 적용
+    net = CNNCAM().to(device) # cuda 연산할 수 있도록 걸어둔다
+
+# 연속적 분포를 갖는 데이터(Regression) 회귀 에는 MSE가 적합하고 이산적 분포를 갖는 데이터(Classification) 분류 에는 CEE가 적합하다
+    loss_fn = nn.MSELoss().to(device) # Mean Squared Error 를 loss_fn으로 정의한다.
+    # BCE Loss(Binary Cross Error) => Segmentation, Classification
+
+
+# main.py 에서 parser.args() 로 parameter를 추가하였으니 아래처럼 자세히 지정한다
+# 실제 코랩에서 --optim 'Adam' or 'SGE' 와 같이 선택적으로 사용할 수 있다
+    if optim_choice == "Adam":
+        optim = torch.optim.Adam(net.parameters(), lr=lr) # loss_fn 을 최소화할 수 있는 파라미터, net에 들어갈 모든 파라미터 들어감
+    elif optim_choice == "SGD":
+        optim = torch.optim.SGE(net.parameters(), lr=lr)
+        
+    writer_train = SummaryWriter(log_dir=os.path.join(log_dir, 'train')) # log_dir의 하위폴더에 train 이라는 폴더를 만들어 logs of train 들어간다
+    writer_val = SummaryWriter(log_dir=os.path.join(log_dir, 'val')) # log_dir의 하위폴더에 val 이라는 폴더를 만들어 logs of val 들어간다
+
+    start_epoch = 0 # 0부터 학습을 시작한다. 
+    #ex epoch 1(001/500) => train data 450 학습(001/450) => epoch 2(002/500) => train data 450(002/450) 학습
+
+#?아래의 if mode 는 위의 if mode(45 line~)와 다른점이 ..무엇인가요?
+    if mode == 'train': # mode 가 'train'이라면..
+        if cont == "yes": # yes로 할 경우 전에 학습한 chpt를 가져와서 이어서 학습한다
+            net, optim, start_epoch = load(ckpt_dir = ckpt_dir, net=net, optim=optim) 
+            # 이어서 학습할 때에, net, optim, start_epoch(?=ckpt_dir 맞나요?)를 load 한다.
+
+        for epoch in range(start_epoch + 1, num_epoch + 1):
+            net.train()
+            loss_set = [] #loss 모아둔다
+            for batch, data in enumerate(batch_train, 1):
+                input = data['input'].to(device)
+                target = data['target'].to(device)
+
+                output, _ = net(input)
+                optim.zero_grad() 
+                # loss.backward() backpropagation을 하기전에 gradients를 zero로 만들어주고 시작을 해야한다.
+                # Pytorch에서는 gradients값들을 추후에 backward를 해줄때 계속 더해주기 때문에.
+                # 학습 loop를 돌때 이상적으로 학습이 이루어지기 위해선 한번의 학습이 완료되어지면
+                # (즉, Iteration이 한번 끝나면) gradients를 항상 0으로 만들어 주어야 한다. 
+                # 만약 gradients를 0으로 초기화해주지 않으면 gradient가 의도한 방향이랑 다른 방향을 가리켜 
+                # 학습이 원하는 방향으로 이루어 지지 않는다.
+                # 즉, optimizer에 연결된 parameter들의 gradient를 0으로 만든다.
+                # cf. model.zero_grad() 모델의 모든 가중치를 학습
+
+                loss = loss_fn(output, target)
+                loss.backward() 
+                # 뒤로 돌아가면서 학습한다. backpropagation
+                # loss.backward() 하기전에 꼭 gradient를 zero_grad() 를 통해서 0으로 셋팅해야 한다.
+
+                optim.step() 
+                # 옵티마이저는 update할 parameter와 learning rate 및 여러 다른 hyper-parameter를 받아 
+                # optim.step() method 를 통해 업데이트한다.
+                
+                loss_set += [loss.item()] 
+                #? 손실이 갖고 있는 스칼라 값을 가져온다는 말인가요?
+                # you could just sum it and calculate the mean after the epoch finishes.
+                # mean of all epoch 를 구하기 위해 +를 통해서 지속적으로 더해준다.
+                # 그 값은 아래처럼 np.mean(loss_set) 으로 코랩에서 실시간으로 보는 것과 동일하다.
+
+                print("TRAIN: EPOCH %04d / %04d | BATCH %04d / %04d | %.4f" %
+                      (epoch, num_epoch, batch, num_batch_train, np.mean(loss_set)))
+
+            writer_train.add_scalar('loss', np.mean(loss_set), epoch)
+
+            with torch.no_grad(): 
+                # val 에서는 no grad 미분안하고 opti도 안하고 바로 로스펑션만
+                # autograd engine 을 끔으로써 메모리 사용량을 줄이고 연산 속도를 높힌다.
+                net.eval()
+                # eval() 함수는 evaluation 과정에서 사용하지 않아야 하는 layer들을 알아서 off 시킨다.(Dropout layer, BatchNorm layer)
+                # train <> evaluation learning 에서 D_layer & B_layer는 다르게 학습해야 한다. (train=on, evaluation=off)
+                # evaluation/validation 과정에선 보통 model.eval()과 torch.no_grad()를 함께 사용한다.
+                loss_set = []
+                for batch, data in enumerate(batch_val, 1):
+                    input = data['input'].to(device)
+                    target = data['target'].to(device)
+
+                    output, _ = net(input)
+
+                    loss = loss_fn(output, target)
+                    loss_set += [loss.item()]
+
+                    print("VALID: EPOCH %04d / %04d | BATCH %04d / %04d | %.4f" %
+                          (epoch, num_epoch, batch, num_batch_val, np.mean(loss_set)))
+                          # 진행중인 epoch, 총 epoch, 진행중인 batch, 총 batch size, loss.function mean value. 
+
+            writer_val.add_scalar('loss', np.mean(loss_set), epoch)
+
+            if epoch % 5 == 0: # 5번 반복할 때마다 모델을 저장한다
+                save(ckpt_dir=ckpt_dir, net=net, optim=optim, epoch=epoch)
+
+        writer_train.close()
+        writer_val.close()
+
+    else: ## test 단계 (mode == 'train' 이 아닐시에)
+        net, optim, start_epoch = load(ckpt_dir=ckpt_dir, net=net, optim=optim)
+        with torch.no_grad(): # autograd engine 을 끔으로써 메모리 사용량을 줄이고 연산 속도를 높힌다.
+            net.eval() 
+            # eval() 함수는 evaluation 과정에서 사용하지 않아야 하는 layer들을 알아서 off 시킨다.(Dropout layer, BatchNorm layer)
+            # train <> evaluation learning 에서 D_layer & B_layer는 다르게 학습해야 한다. (train=on, evaluation=off)
+            # evaluation/validation 과정에선 보통 model.eval()과 torch.no_grad()를 함께 사용한다.
+            
+            outputs = torch.zeros(num_data_test, 2) # 자리를 만들어놓고 아래에서 하나씩 가져오려고
+            CAMS = torch.zeros(num_data_test,32,32)
+            cnt = 0
+            for batch, data in enumerate(batch_test, 1):
+                # enumerate() 반복문 사용 시 몇 번째 반복문인지 확인이 필요할 때 사용한다.
+                # 인덱스 번호와 컬렉션의 원소를 tuple형태로 반환한다.
+                input = data['input'].to(device)
+                output, CAM = net(input)
+                outputs[cnt,:] = output
+                CAMS[cnt,:,:] = CAM
+                cnt += 1
+            save_result(res_dir=res_dir, output=outputs)
+            save_result2(res_dir=res_dir, output=CAMS)
